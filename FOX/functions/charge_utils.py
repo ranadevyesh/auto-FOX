@@ -204,13 +204,47 @@ def constrained_update(at1: KT, param: pd.Series,
     return exclude
 
 
+def _constrained_update(atom: KT, value: float, param: pd.Series, count: pd.Series,
+                        atom_coefs: Collection[pd.Series],
+                        param_min: pd.Series, param_max: pd.Series) -> None:
+    """Pass."""
+    value_old = pd.Series[atom]
+    x = value / value_old
+
+    # Scale all parameters (correct them afterwards)
+    param *= x
+    param.clip(param_min, param_max, inplace=True)
+    param[atom] = value
+
+    # Identify the charge of the moved atoms set of constraints
+    for ref_coef in atom_coefs:
+        if atom in ref_coef.index:
+            break
+    else:
+        raise ValueError(repr(atom))
+    idx = ref_coef.index
+    net_charge = (param.loc[idx] * ref_coef.loc[idx]).sum()
+
+    # Update the charge of all other charge-constraint blocks
+    coef_iterator = (coef for coef in atom_coefs if coef is not ref_coef)
+    for coef in coef_iterator:
+        idx = coef.index
+        _prm = param.loc[idx] * coef
+        _min = param_min.loc[idx] * coef
+        _max = param_max.loc[idx] * coef
+
+        unconstrained_update(net_charge, _prm, count.loc[idx], prm_min=_min, prm_max=_max)
+        param.loc[idx] = _prm / coef
+
+
 def unconstrained_update(net_charge: float, param: pd.Series, count: pd.Series,
                          prm_min: Optional[ArrayLike] = None,
                          prm_max: Optional[ArrayLike] = None,
                          exclude: Optional[Container[Hashable]] = None) -> None:
     """Perform an unconstrained update of atomic charges."""
     if exclude is None:
-        include = pd.Series(np.ones_like(param, dtype=bool), index=param.index)
+        include = param.astype(bool, copy=True)
+        include.loc[:] = True
     else:
         include = pd.Series([i not in exclude for i in param.keys()], index=param.index)
     if not include.any():
@@ -235,7 +269,7 @@ def unconstrained_update(net_charge: float, param: pd.Series, count: pd.Series,
         param[atom] = s_clip[atom]
         include[atom] = False
 
-        if s_clip[atom] != s[atom] and j:
+        if j and s_clip[atom] != s[atom]:
             i = net_charge - get_net_charge(param, count, ~include)
             i /= get_net_charge(param, count, include)
 
@@ -258,117 +292,6 @@ def _check_net_charge(param: pd.Series, count: pd.Series, net_charge: float,
         f"Failed to conserve the net charge: ref = {net_charge:.4f}); {net_charge_new:.4f} != ref",
         reference=net_charge, value=net_charge_new, tol=tolerance
     )
-
-
-class ChargeMapping(Mapping[FrozenSet[str], pd.DataFrame]):
-
-    __slots__ = ('__weakref__', '_data')
-
-    def __init__(self, *atom_sets: Iterable[str],
-                 constants: Optional[Iterable[str]] = None,
-                 **atoms: Tuple[float, float, float]) -> None:
-        r"""Initialize an instance."""
-        df = pd.DataFrame(atoms, columns=['values', 'min', 'max'])
-        df['values'] *= df['coefficient']
-        df['variables'] = True
-        if constants is not None:
-            df.loc[list(constants), 'variables'] = False
-
-        # Ensure that all key-sets are disjoint with respect to each other
-        keys = [frozenset(i) for i in atom_sets]
-        keys_len = sum(len(k) for k in keys)
-        try:
-            union = frozenset.union(*keys)
-        except TypeError as ex:
-            raise TypeError("missing argument '*atom_sets;") from ex
-        if keys_len != len(union):
-            raise ValueError
-
-        self._data: Mapping[FrozenSet[str], pd.DataFrame] = MappingProxyType({
-            k: df.loc[list(k)] for k in keys
-        })
-
-        # Ensure that each block has, at least, a single variable
-        for df in self.values():
-            if not df['variables'].any():
-                raise ValueError
-
-    def __getitem__(self, key: Union[str, FrozenSet[str]]) -> pd.DataFrame:
-        """Implement :meth:`self[key]<object.__getitem__>`."""
-        if isinstance(key, str):
-            for k, v in self.items():
-                if key in k:
-                    return v
-            else:
-                raise KeyError(key)
-        else:
-            return self._data[key]
-
-    def __iter__(self) -> Iterator[FrozenSet[str]]:
-        """Implement :func:`iter(self)<iter>`."""
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        """Implement :func:`len(self)<len>`."""
-        return len(self._data)
-
-    def __contains__(self, key: Hashable) -> bool:
-        """Implement :meth:`key in self<object.__contains__>`."""
-        return key in self._data
-
-    def keys(self) -> KeysView[FrozenSet[str]]:
-        """Return a set-like object providing a view of this instance's keys."""
-        return self._data.keys()  # type: ignore
-
-    def items(self) -> ItemsView[FrozenSet[str], pd.DataFrame]:
-        """Return a set-like object providing a view of this instance's key/value pairs."""
-        return self._data.items()  # type: ignore
-
-    def values(self) -> ValuesView[pd.DataFrame]:
-        """Return an object providing a view of this instance's values."""
-        return self._data.values()
-
-    @overload
-    def get(self, key: Hashable) -> Optional[pd.DataFrame]:
-        ...
-    @overload
-    def get(self, key: Hashable, default: T) -> Union[pd.DataFrame, T]:
-        ...
-    def get(self, key, default=None):  # noqa: E301
-        """Return the value for **key** if it's available; return **default** otherwise."""
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-    def __call__(self, name: str, value: float) -> pd.Series:
-        df_ref = self[name]
-        value_old = df_ref[name, 'values']
-        factor = value / value_old
-
-        df_ref.loc[df_ref['variables'], 'values'] *= factor
-        df_ref.at[name, 'values'] = value
-        df_ref['values'].clip(df_ref['min'], df_ref['max'], inplace=True)
-        charge_ref = df_ref['values'].sum()
-
-        df_iter = (df for df in self.values() if df is not df_ref)
-        for df in df_iter:
-            variables = df['variables']
-            df.loc[variables, 'values'] *= factor
-            df['values'].clip(df['min'], df['max'], inplace=True)
-            charge = df['values'].sum()
-
-            delta = charge - charge_ref
-            if np.allclose(delta, 0.0):
-                continue
-            variables = variables.copy()
-            variables &= df['values'] != df['max'] | df['values'] != df['min']
-
-            x = (charge_ref - df.loc[~variables, 'values'].sum())
-            x /= df.loc[variables, 'values'].sum()
-            df.loc[variables, 'values'] *= x
-            if not np.allclose(df['values'].sum(), charge_ref):
-                raise RuntimeError
 
 
 def invert_partial_ufunc(ufunc: partial) -> partial:
