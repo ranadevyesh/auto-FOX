@@ -104,9 +104,10 @@ def get_net_charge(param: pd.Series, count: pd.Series,
 
 
 def update_charge(atom: KT, value: float, param: pd.Series, count: pd.Series,
-                  constrain_dict: Optional[Mapping[KT, partial]] = None,
-                  prm_min: Optional[ArrayLike] = None,
-                  prm_max: Optional[ArrayLike] = None,
+                  atom_coefs: Optional[Collection[pd.Series]] = None,
+                  prm_min: Optional[pd.Series] = None,
+                  prm_max: Optional[pd.Series] = None,
+                  exclude: Optional[Collection[KT]] = None,
                   net_charge: Optional[float] = None) -> Optional[ChargeError]:
     """Set the atomic charge of **at** equal to **charge**.
 
@@ -118,41 +119,24 @@ def update_charge(atom: KT, value: float, param: pd.Series, count: pd.Series,
 
     Performs an inplace update of the *param* column in **df**.
 
-    Examples
-    --------
-    .. code:: python
-
-        >>> print(df)
-            param  count
-        Br   -1.0    240
-        Cs    1.0    112
-        Pb    2.0     64
-
-    Parameters
-    ----------
-    atom : str
-        An atom type such as ``"Se"``, ``"Cd"`` or ``"OG2D2"``.
-
-    charge : float
-        The new charge associated with **at**.
-
-    df : |pd.DataFrame|_
-        A dataframe with atomic charges.
-        Charges should be stored in the *param* column and atom counts in the *count* column.
-
-    constrain_dict : dict
-        A dictionary with charge constrains.
-
     """
     param_backup = param.copy()
-    param[atom] = value
-
-    if constrain_dict is None or atom in constrain_dict:
-        exclude = constrained_update(atom, param, constrain_dict)
+    if exclude is None:
+        exclude_set = set()
     else:
-        exclude = {atom}
+        exclude_set = set(exclude)
+
+    if atom_coefs is not None:
+        try:
+            constrained_update(atom, value, param, count, atom_coefs, prm_min, prm_max, exclude_set)
+        except ChargeError as ex:
+            param[:] = param_backup
+            return ex
+        exclude_set.update(atom_coefs)
 
     if net_charge is not None:
+        exclude_set.add(atom)
+        param[atom] = value
         try:
             unconstrained_update(net_charge, param, count,
                                  prm_min=prm_min,
@@ -164,57 +148,36 @@ def update_charge(atom: KT, value: float, param: pd.Series, count: pd.Series,
     return None
 
 
-def constrained_update(at1: KT, param: pd.Series,
-                       constrain_dict: Optional[Mapping[KT, partial]] = None) -> Set[KT]:
+def constrained_update(atom: KT, value: float, param: pd.Series, count: pd.Series,
+                       atom_coefs: Collection[pd.Series],
+                       param_min: pd.Series, param_max: pd.Series,
+                       exclude: Optional[Set[KT]] = None) -> None:
     """Perform a constrained update of atomic charges.
 
-    Performs an inplace update of the ``"param"`` column in **df**.
+    Performs an inplace update **param**.
 
     Parameters
     ----------
-    at1 : str
+    atom : str
         An atom type such as ``"Se"``, ``"Cd"`` or ``"OG2D2"``.
+    value : :class:`float`
+        The value to be assigned to **atom**.
+    param : :class:`pandas.Series`
+        A Series with parameter values.
+    count : :class:`pandas.Series`
+        A Series with the number of atoms per parameter.
+    atom_coefs : :class:`Collection[pandas.Series]<typing.Collection>`
+        A collection *placeholder*.
+    param_min : :class:`pandas.Series`
+        A Series with the minimum values for all parameters in **param**.
+    param_min : :class:`pandas.Series`
+        A Series with the maximum values for all parameters in **param**.
 
-    df : |pd.DataFrame|_
-        A dataframe with atomic charges.
 
-    constrain_dict : dict
-        A dictionary with charge constrains (see :func:`.get_charge_constraints`).
-
-    Returns
-    -------
-    |list|_ [|str|_]:
-        A list of atom types with updated atomic charges.
+    :rtype: :data:`None`
 
     """
-    charge = param[at1]
-    exclude = {at1}
-    if constrain_dict is None:
-        return exclude
-
-    # Perform a constrained charge update
-    func1 = invert_partial_ufunc(constrain_dict[at1])
-    for at2, func2 in constrain_dict.items():
-        if at2 == at1:
-            continue
-        exclude.add(at2)
-
-        # Update the charges
-        param[at2] = func2(func1(charge))
-    return exclude
-
-
-def _constrained_update(atom: KT, value: float, param: pd.Series, count: pd.Series,
-                        atom_coefs: Collection[pd.Series],
-                        param_min: pd.Series, param_max: pd.Series) -> None:
-    """Pass."""
-    value_old = pd.Series[atom]
-    x = value / value_old
-
-    # Scale all parameters (correct them afterwards)
-    param *= x
-    param.clip(param_min, param_max, inplace=True)
-    param[atom] = value
+    exclude_set = _update_1st_charge(atom, value, param, param_min, param_max, exclude)
 
     # Identify the charge of the moved atoms set of constraints
     for ref_coef in atom_coefs:
@@ -223,23 +186,54 @@ def _constrained_update(atom: KT, value: float, param: pd.Series, count: pd.Seri
     else:
         raise ValueError(repr(atom))
     idx = ref_coef.index
-    net_charge = (param.loc[idx] * ref_coef.loc[idx]).sum()
+    idx_ref = idx.tolist()
+    net_charge: float = (param.loc[idx] * count.loc[idx] * ref_coef.loc[idx]).sum()
+
+    df = pd.DataFrame({'param': param, 'count': count,
+                       'prm_min': param_min, 'prm_max': param_max})
 
     # Update the charge of all other charge-constraint blocks
     coef_iterator = (coef for coef in atom_coefs if coef is not ref_coef)
     for coef in coef_iterator:
+        # Identify the to-be considered slice
         idx = coef.index
-        _prm = param.loc[idx] * coef
-        _min = param_min.loc[idx] * coef
-        _max = param_max.loc[idx] * coef
+        idx_ref += idx.tolist()
+        exclude_set.update(idx.intersection(idx_ref))
 
-        unconstrained_update(net_charge, _prm, count.loc[idx], prm_min=_min, prm_max=_max)
-        param.loc[idx] = _prm / coef
+        # Update the charges
+        df_kwargs = df.loc[idx] * coef
+        unconstrained_update(net_charge, exclude=exclude_set, **df_kwargs)
+        param.loc[idx] = df_kwargs['param'] / coef
+
+
+def _update_1st_charge(atom: KT, value: float, param: pd.Series,
+                       param_min: pd.Series, param_max: pd.Series,
+                       exclude: Optional[Set[KT]] = None) -> Set[KT]:
+    """Helper function for :func:`constrained_update`."""
+    if exclude is not None:
+        exclude_set = exclude.copy()
+        idx_ = param.astype(bool, copy=True)
+        idx_[:] = True
+        idx_[list(exclude_set)] = False
+    else:
+        exclude_set = set()
+        idx_ = slice(None)
+    exclude_set.add(atom)
+
+    value_old = pd.Series[atom]
+    x = value / value_old
+
+    # Scale all parameters (correct them afterwards)
+    prm_exclude = param.astype(bool, copy=True)
+    param.loc[idx_] *= x
+    param.clip(param_min, param_max, inplace=True)
+    param[atom] = value
+    return exclude_set
 
 
 def unconstrained_update(net_charge: float, param: pd.Series, count: pd.Series,
-                         prm_min: Optional[ArrayLike] = None,
-                         prm_max: Optional[ArrayLike] = None,
+                         prm_min: Optional[pd.Series] = None,
+                         prm_max: Optional[pd.Series] = None,
                          exclude: Optional[Container[Hashable]] = None) -> None:
     """Perform an unconstrained update of atomic charges."""
     if exclude is None:
@@ -294,14 +288,8 @@ def _check_net_charge(param: pd.Series, count: pd.Series, net_charge: float,
     )
 
 
-def invert_partial_ufunc(ufunc: partial) -> partial:
-    """Invert a NumPy universal function embedded within a :class:`partial` instance."""
-    func = ufunc.func
-    x2 = ufunc.args[0]
-    return partial(func, x2**-1)
-
-
 ExtremiteDict = Dict[Tuple[str, str], float]
+ConstrainDict = Dict
 
 
 def assign_constraints(constraints: Union[str, Iterable[str]]
