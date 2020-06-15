@@ -14,6 +14,12 @@ with open(os.path.join(here, 'FOX', '__version__.py'), encoding='utf-8') as f:
 with open('README.rst', encoding='utf-8') as readme_file:
     readme = readme_file.read()
 
+docs_require = [
+    'sphinx>=2.4,!=3.1.1',
+    'sphinx_rtd_theme',
+    'matplotlib'
+]
+
 tests_require = [
     'pytest>=5.4.0',
     'pytest-cov',
@@ -22,12 +28,7 @@ tests_require = [
     'pytest-pydocstyle>=2.1',
     'matplotlib'
 ]
-
-docs_require = [
-    'sphinx>=2.1',
-    'sphinx_rtd_theme',
-    'matplotlib'
-]
+tests_require += docs_require
 
 setup(
     name='Auto-FOX',

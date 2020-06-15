@@ -14,6 +14,7 @@ This project adheres to `Semantic Versioning <http://semver.org/>`_.
 * Do not read or write comments to and from a .prm file.
 * Upped the minimum Sphinx version to `2.1`.
 * Removed `sphinx-autodoc-typehints`.
+* Added tests for generating documentation.
 
 
 0.8.6
