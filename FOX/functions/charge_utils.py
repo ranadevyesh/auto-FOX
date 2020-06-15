@@ -98,8 +98,8 @@ def get_net_charge(param: pd.Series, count: pd.Series,
         The total charge in **df**.
 
     """
-    index_ = slice(None) if index is None else index
-    ret = param[index_] * count[index_]
+    idx = slice(None) if index is None else index
+    ret = param[idx] * count[idx]
     return ret.sum()
 
 
