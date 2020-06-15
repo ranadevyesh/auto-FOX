@@ -72,7 +72,6 @@ class InputMapping(_InputMapping, total=False):
 
     min: pd.Series
     max: pd.Series
-    constraints: pd.Series
     count: pd.Series
 
 
@@ -83,7 +82,6 @@ class Data(TypedDict):
     param_old: pd.DataFrame
     min: pd.Series
     max: pd.Series
-    constraints: pd.Series
     count: pd.Series
 
 
@@ -177,7 +175,8 @@ class ParamMappingABC(AbstractDataClass, ABC, _ParamMappingABC):
 
     """
 
-    _net_charge: Optional[float]
+    net_charge: Optional[float]
+    constraints: Mapping[str, Optional[Tuple[pd.Series, ...]]]
     _move_range: np.ndarray
     __data: Data
 
@@ -185,15 +184,14 @@ class ParamMappingABC(AbstractDataClass, ABC, _ParamMappingABC):
     FILL_VALUE: ClassVar[Mapping[ValidKeys, Any]] = MappingProxyType({
         'min': -np.inf,
         'max': np.inf,
-        'constraints': None,  # Dict[str, functools.partial]
         'count': -1
     })
 
-    _PRIVATE_ATTR = frozenset({'_net_charge'})  # type: ignore
-
     def __init__(self, data: Union[InputMapping, pd.DataFrame],
                  move_range: Iterable[float],
-                 func: MoveFunc, **kwargs: Any) -> None:
+                 func: MoveFunc,
+                 constraints: Optional[Mapping[str, Optional[Tuple[pd.Series, ...]]]] = None,
+                 **kwargs: Any) -> None:
         r"""Initialize an :class:`ParamMappingABC` instance.
 
         Parameters
@@ -235,6 +233,10 @@ class ParamMappingABC(AbstractDataClass, ABC, _ParamMappingABC):
         self._data = cast(Data, data)
         self.move_range = cast(np.ndarray, move_range)
         self.func: Callable[[float, float], float] = wraps(func)(partial(func, **kwargs))
+        if constraints is None:
+            self.constraints = {k: None for k in self._data.index.levels[0]}
+        else:
+            self.constraints = constraints
 
     # Properties
 
