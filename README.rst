@@ -89,6 +89,8 @@ Installing **Auto-FOX**
 
 - If using Conda, enable the environment: ``conda activate FOX``
 
+- You may need to install git first using : ``conda install git``
+
 - Install **Auto-FOX** with PyPi: ``pip install git+https://github.com/nlesc-nano/auto-FOX@master --upgrade``
 
 - Congratulations, **Auto-FOX** is now installed and ready for use!
